@@ -2,12 +2,14 @@ import random
 import streamlit as st
 
 def get_range_for_difficulty(difficulty: str):
+    # FIX: Normal and Hard had their ranges swapped (Normal 1-100, Hard 1-50).
+    # The range should widen as difficulty increases.
     if difficulty == "Easy":
         return 1, 20
     if difficulty == "Normal":
-        return 1, 100
-    if difficulty == "Hard":
         return 1, 50
+    if difficulty == "Hard":
+        return 1, 100
     return 1, 100
 
 
@@ -33,18 +35,13 @@ def check_guess(guess, secret):
     if guess == secret:
         return "Win", "🎉 Correct!"
 
-    try:
-        if guess > secret:
-            return "Too High", "📈 Go HIGHER!"
-        else:
-            return "Too Low", "📉 Go LOWER!"
-    except TypeError:
-        g = str(guess)
-        if g == secret:
-            return "Win", "🎉 Correct!"
-        if g > secret:
-            return "Too High", "📈 Go HIGHER!"
-        return "Too Low", "📉 Go LOWER!"
+    # FIX: the outcome and the message were inverted relative to each other.
+    # The outcome says what the guess WAS ("Too High"); the message says what to
+    # do NEXT. A guess that is too high means the player must go LOWER.
+    if guess > secret:
+        return "Too High", "📉 Go LOWER!"
+
+    return "Too Low", "📈 Go HIGHER!"
 
 
 def update_score(current_score: int, outcome: str, attempt_number: int):
@@ -93,7 +90,9 @@ if "secret" not in st.session_state:
     st.session_state.secret = random.randint(low, high)
 
 if "attempts" not in st.session_state:
-    st.session_state.attempts = 1
+    # FIX: started at 1, so a fresh game already showed one attempt used.
+    # attempts counts guesses actually made, so it starts at 0.
+    st.session_state.attempts = 0
 
 if "score" not in st.session_state:
     st.session_state.score = 0
@@ -104,19 +103,23 @@ if "status" not in st.session_state:
 if "history" not in st.session_state:
     st.session_state.history = []
 
+if "difficulty" not in st.session_state:
+    st.session_state.difficulty = difficulty
+
+# Message carried across an st.rerun() to be shown on the next pass.
+if "notice" not in st.session_state:
+    st.session_state.notice = None
+
+# Changing difficulty changes the range, so the old secret is no longer valid.
+if st.session_state.difficulty != difficulty:
+    st.session_state.difficulty = difficulty
+    st.session_state.secret = random.randint(low, high)
+    st.session_state.attempts = 0
+    st.session_state.score = 0
+    st.session_state.status = "playing"
+    st.session_state.history = []
+
 st.subheader("Make a guess")
-
-st.info(
-    f"Guess a number between 1 and 100. "
-    f"Attempts left: {attempt_limit - st.session_state.attempts}"
-)
-
-with st.expander("Developer Debug Info"):
-    st.write("Secret:", st.session_state.secret)
-    st.write("Attempts:", st.session_state.attempts)
-    st.write("Score:", st.session_state.score)
-    st.write("Difficulty:", difficulty)
-    st.write("History:", st.session_state.history)
 
 raw_guess = st.text_input(
     "Enter your guess:",
@@ -132,38 +135,51 @@ with col3:
     show_hint = st.checkbox("Show hint", value=True)
 
 if new_game:
+    # FIX: only attempts and secret were reset. status stayed "won"/"lost", so a
+    # finished game could never restart, and score/history carried over. Reset
+    # every piece of game state.
     st.session_state.attempts = 0
-    st.session_state.secret = random.randint(1, 100)
-    st.success("New game started.")
+    # FIX: was hardcoded randint(1, 100), which ignored the selected difficulty.
+    st.session_state.secret = random.randint(low, high)
+    st.session_state.score = 0
+    st.session_state.status = "playing"
+    st.session_state.history = []
+    # st.rerun() throws away anything drawn before it, so the old st.success()
+    # here never appeared. Stash the notice and render it after the rerun.
+    st.session_state.notice = "New game started."
     st.rerun()
+
+# FIX (render order): the banner and debug panel used to sit ABOVE this block.
+# Streamlit runs top-to-bottom, so they drew themselves before the new guess was
+# recorded and always showed the PREVIOUS click's state. Now the guess is
+# processed first and messages are collected here, then everything renders below
+# against current state.
+feedback = []
+celebrate = False
 
 if st.session_state.status != "playing":
     if st.session_state.status == "won":
-        st.success("You already won. Start a new game to play again.")
+        feedback.append((st.success, "You already won. Start a new game to play again."))
     else:
-        st.error("Game over. Start a new game to try again.")
-    st.stop()
-
-if submit:
+        feedback.append((st.error, "Game over. Start a new game to try again."))
+elif submit:
     st.session_state.attempts += 1
 
     ok, guess_int, err = parse_guess(raw_guess)
 
     if not ok:
         st.session_state.history.append(raw_guess)
-        st.error(err)
+        feedback.append((st.error, err))
     else:
         st.session_state.history.append(guess_int)
 
-        if st.session_state.attempts % 2 == 0:
-            secret = str(st.session_state.secret)
-        else:
-            secret = st.session_state.secret
-
-        outcome, message = check_guess(guess_int, secret)
+        # FIX: on even attempts the secret was cast to str, which made
+        # check_guess compare text lexicographically ("9" > "50") instead of
+        # numerically. Always compare the int.
+        outcome, message = check_guess(guess_int, st.session_state.secret)
 
         if show_hint:
-            st.warning(message)
+            feedback.append((st.warning, message))
 
         st.session_state.score = update_score(
             current_score=st.session_state.score,
@@ -172,20 +188,55 @@ if submit:
         )
 
         if outcome == "Win":
-            st.balloons()
+            celebrate = True
             st.session_state.status = "won"
-            st.success(
+            feedback.append((
+                st.success,
                 f"You won! The secret was {st.session_state.secret}. "
-                f"Final score: {st.session_state.score}"
-            )
+                f"Final score: {st.session_state.score}",
+            ))
         else:
             if st.session_state.attempts >= attempt_limit:
                 st.session_state.status = "lost"
-                st.error(
+                feedback.append((
+                    st.error,
                     f"Out of attempts! "
                     f"The secret was {st.session_state.secret}. "
-                    f"Score: {st.session_state.score}"
-                )
+                    f"Score: {st.session_state.score}",
+                ))
+
+if st.session_state.notice:
+    st.success(st.session_state.notice)
+    st.session_state.notice = None
+
+for show, text in feedback:
+    show(text)
+
+if celebrate:
+    st.balloons()
+
+attempts_left = max(attempt_limit - st.session_state.attempts, 0)
+
+# FIX: banner was hardcoded to "1 and 100" and contradicted the sidebar.
+st.info(
+    f"Guess a number between {low} and {high}. "
+    f"Attempts left: {attempts_left}"
+)
+
+# FIX: expanded=True keeps the panel open across reruns. A Streamlit expander
+# resets to its default on every script run, so it snapped shut after each guess.
+with st.expander("Developer Debug Info", expanded=True):
+    st.write("Secret:", st.session_state.secret)
+    # FIX: showed the attempt number you were on. Now matches the banner.
+    st.write("Attempts left:", attempts_left)
+    st.write("Score:", st.session_state.score)
+    st.write("Difficulty:", difficulty)
+    # FIX: a plain list renders with 0-based indices, so the first guess read as
+    # 0. Key each guess by its attempt number instead, counting from 1.
+    st.write(
+        "History:",
+        {n: guess for n, guess in enumerate(st.session_state.history, start=1)},
+    )
 
 st.divider()
 st.caption("Built by an AI that claims this code is production-ready.")
